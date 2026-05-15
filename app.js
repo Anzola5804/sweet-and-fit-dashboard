@@ -1,4 +1,4 @@
-// Sweet Bite - Financial Dashboard Logic
+// Sweet&Fit - Financial Dashboard Logic
 // Concept: Minimalism, Dual Currency (Bs/$), Real-time BCV Tasa
 
 // --- CONFIG & INITIAL DATA ---
@@ -737,7 +737,7 @@ function showToast(msg, type = 'info') {
 let currentTutorialStep = 0;
 const tutorialSteps = [
     {
-        title: "¡Bienvenida a Sweet Bite!",
+        title: "¡Bienvenida a Sweet&Fit!",
         text: "Esta app está diseñada para ayudarte a controlar las finanzas y el stock de tus brownies de forma simple y elegante.",
         icon: "✨"
     },
