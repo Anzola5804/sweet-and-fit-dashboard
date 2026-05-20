@@ -890,11 +890,16 @@ function switchPage(page) {
     });
 
     document.querySelectorAll('.page-content').forEach(el => {
-        el.style.display = el.id === `page-${page}` ? 'block' : 'none';
+        if (el) {
+            el.style.display = el.id === `page-${page}` ? 'block' : 'none';
+        }
     });
 
     const titles = { dashboard: 'Dashboard', sales: 'Ventas', inventory: 'Gastos', cobranzas: 'Cobranzas', settings: 'Ajustes' };
-    document.getElementById('page-title').textContent = titles[page];
+    const titleEl = document.getElementById('page-title');
+    if (titleEl) {
+        titleEl.textContent = titles[page] || page;
+    }
     
     // Mostrar/Ocultar el filtro de calendario global
     const filterContainer = document.getElementById('global-filter-container');
