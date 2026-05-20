@@ -100,6 +100,11 @@ function loadState() {
         loadTestData(true);
     }
     
+    // Asegurar que state.rate sea un número válido
+    if (!state.rate || isNaN(state.rate) || typeof state.rate !== 'number') {
+        state.rate = CONFIG.DEFAULTS.rate || 37.50;
+    }
+    
     // Asegurar que filterMonth esté inicializado (por defecto: mes actual)
     if (state.filterMonth === undefined) {
         state.filterMonth = new Date().toISOString().substring(0, 7);
@@ -238,13 +243,16 @@ async function fetchRate() {
 }
 
 function updateRateUI() {
+    const validRate = (state.rate && typeof state.rate === 'number' && !isNaN(state.rate)) ? state.rate : (CONFIG.DEFAULTS.rate || 37.50);
+    const rateString = validRate.toFixed(2);
+    
     const els = ['bcv-rate-sidebar', 'bcv-rate-top'];
     els.forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.textContent = state.rate.toFixed(2) + ' Bs';
+        if (el) el.textContent = rateString + ' Bs';
     });
     const rateInput = document.getElementById('sale-rate');
-    if (rateInput) rateInput.value = state.rate.toFixed(2);
+    if (rateInput) rateInput.value = rateString;
 }
 
 // --- UI RENDERING ---
