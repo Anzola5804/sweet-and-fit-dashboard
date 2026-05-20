@@ -1,30 +1,27 @@
-// Sweet&Fit - Financial Dashboard Logic
-// Concept: Minimalism, Dual Currency (Bs/$), Real-time BCV Tasa
+// Sweet&Fit - Advanced Financial Dashboard Logic (Excel Replacer)
+// Concept: Minimalism, Dual Currency (Bs/$), Cashflow, Accounts Receivable (Cobranzas)
 
 // --- CONFIG & INITIAL DATA ---
 const CONFIG = {
     API_BCV: 'https://ve.dolarapi.com/v1/dolares/oficial',
-    APP_STORAGE_KEY: 'sweet_bite_data',
+    APP_STORAGE_KEY: 'sweet_bite_data_v2',
+    SUPABASE_URL: 'https://sllhkwbvyqwjwcpyedon.supabase.co', // URL de tu proyecto Supabase (ej: 'https://xxxx.supabase.co')
+    SUPABASE_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNsbGhrd2J2eXF3andjcHllZG9uIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNjY2MzMsImV4cCI6MjA5NDg0MjYzM30.kspc119MY38O8ARFqaAZHpt0FtGGw8ACpAz_BV_S6UQ', // Tu Anon Key de Supabase
     DEFAULTS: {
-        rate: 37.0, // Fallback rate
+        rate: 37.50, // Default rate
         products: [
             { id: 1, name: 'Torta Brownie Keto', price: 30.00, cost: 18.15, emoji: '🍫', unit: 'Bandeja' },
             { id: 2, name: 'Torta TORRE Keto', price: 35.00, cost: 20.17, emoji: '🏆', unit: 'Bandeja' },
-            { id: 3, name: 'Brownie Individual', price: 2.50, cost: 1.69, emoji: '🎯', unit: 'Unidad' }
+            { id: 3, name: 'Brownie Detal', price: 3.00, cost: 1.67, emoji: '🎯', unit: 'Unidad' },
+            { id: 4, name: 'Brownie Comercial', price: 2.50, cost: 1.67, emoji: '💼', unit: 'Unidad' }
         ],
+        // Sample baseline ingredients for reference
         ingredients: [
             { name: 'Huevos (4 und)', cost: 1.20 },
             { name: 'Monkfruit (50g)', cost: 1.65 },
             { name: 'Chocolate Barra (120g)', cost: 4.32 },
             { name: 'Harina Almendra (120g)', cost: 3.53 },
-            { name: 'Chispas Chocolate (40g)', cost: 1.68 },
-            { name: 'Vainilla (15ml)', cost: 0.12 },
-            { name: 'Cacao (5g)', cost: 0.11 },
-            { name: 'Polvo Hornear (9g)', cost: 0.90 },
-            { name: 'Aceite Coco (3ml)', cost: 0.03 }
-        ],
-        fixedCosts: [
-            { id: Date.now(), desc: 'Marketing/Redes', amount: 15.00 }
+            { name: 'Chispas Chocolate (40g)', cost: 1.68 }
         ]
     }
 };
@@ -32,24 +29,62 @@ const CONFIG = {
 let state = {
     rate: CONFIG.DEFAULTS.rate,
     sales: [],
-    production: [],
-    inventory: 0, // In units (brownies)
-    fixedCosts: [...CONFIG.DEFAULTS.fixedCosts],
+    expenses: [], // Replaces production/fixedCosts with custom expenses
     products: [...CONFIG.DEFAULTS.products],
-    ingredients: [...CONFIG.DEFAULTS.ingredients],
     activePage: 'dashboard',
     activePeriod: 'month',
     tutorialSeen: false
 };
 
+// --- SUPABASE CLIENT INITIALIZATION ---
+let supabase = null;
+if (CONFIG.SUPABASE_URL && CONFIG.SUPABASE_KEY && window.supabase) {
+    try {
+        supabase = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
+    } catch (e) {
+        console.error('Error al inicializar Supabase:', e);
+    }
+}
+
 // --- CORE FUNCTIONS ---
 
-function init() {
+async function init() {
     loadState();
+    
+    // Configurar valor inicial del input de filtro en el DOM
+    const filterInput = document.getElementById('global-month-filter');
+    if (filterInput) {
+        filterInput.value = state.filterMonth || '';
+        
+        // Actualizar apariencia del botón YTD
+        const btnYtd = document.getElementById('btn-ytd');
+        if (btnYtd) {
+            if (state.filterMonth) {
+                btnYtd.classList.remove('btn-primary');
+                btnYtd.classList.add('btn-secondary');
+            } else {
+                btnYtd.classList.remove('btn-secondary');
+                btnYtd.classList.add('btn-primary');
+            }
+        }
+    }
+    
     fetchRate();
     setupEventListeners();
     renderAll();
     initChart();
+    
+    // Si Supabase está activo, intentar sincronizar con la nube inmediatamente
+    if (supabase) {
+        await syncWithCloud();
+    }
+    
+    // Auto-sincronizar en segundo plano cuando la pestaña vuelve a estar activa (ej. al abrir el cel)
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && supabase) {
+            syncWithCloud();
+        }
+    });
     
     if (!state.tutorialSeen) {
         setTimeout(startTutorial, 1500);
@@ -60,11 +95,130 @@ function loadState() {
     const saved = localStorage.getItem(CONFIG.APP_STORAGE_KEY);
     if (saved) {
         state = { ...state, ...JSON.parse(saved) };
+    } else {
+        // First load: seed some initial sample data so the dashboard doesn't look empty
+        loadTestData(true);
+    }
+    
+    // Asegurar que filterMonth esté inicializado (por defecto: mes actual)
+    if (state.filterMonth === undefined) {
+        state.filterMonth = new Date().toISOString().substring(0, 7);
+    }
+    
+    updateSyncStatusUI(supabase ? 'synced' : 'local');
+}
+
+async function saveState() {
+    localStorage.setItem(CONFIG.APP_STORAGE_KEY, JSON.stringify(state));
+    
+    if (supabase) {
+        updateSyncStatusUI('syncing');
+        try {
+            // Guardar solo datos de negocio en la nube para no alterar las vistas locales de otros dispositivos
+            const syncPayload = {
+                rate: state.rate,
+                sales: state.sales,
+                expenses: state.expenses,
+                products: state.products
+            };
+            
+            const { error } = await supabase
+                .from('sweet_fit_state')
+                .upsert({ 
+                    id: 'main_state', 
+                    data: syncPayload, 
+                    updated_at: new Date().toISOString() 
+                });
+            
+            if (error) throw error;
+            updateSyncStatusUI('synced');
+        } catch (e) {
+            console.error('Error al guardar en Supabase:', e);
+            updateSyncStatusUI('error');
+        }
+    } else {
+        updateSyncStatusUI('local');
     }
 }
 
-function saveState() {
-    localStorage.setItem(CONFIG.APP_STORAGE_KEY, JSON.stringify(state));
+async function syncWithCloud() {
+    if (!supabase) return;
+    
+    updateSyncStatusUI('syncing');
+    try {
+        const { data, error } = await supabase
+            .from('sweet_fit_state')
+            .select('data')
+            .eq('id', 'main_state')
+            .single();
+        
+        if (error && error.code !== 'PGRST116') { // PGRST116 is "no rows returned" (first run)
+            throw error;
+        }
+        
+        if (data && data.data) {
+            // Comparamos únicamente la data de negocio
+            const currentBusiness = {
+                rate: state.rate,
+                sales: state.sales,
+                expenses: state.expenses,
+                products: state.products
+            };
+            
+            const cloudBusinessStr = JSON.stringify(data.data);
+            const currentBusinessStr = JSON.stringify(currentBusiness);
+            
+            if (cloudBusinessStr !== currentBusinessStr) {
+                state.rate = data.data.rate || state.rate;
+                state.sales = data.data.sales || [];
+                state.expenses = data.data.expenses || [];
+                state.products = data.data.products || state.products;
+                
+                localStorage.setItem(CONFIG.APP_STORAGE_KEY, JSON.stringify(state));
+                renderAll();
+                if (typeof updateChart === 'function') updateChart();
+                showToast('🔄 Datos sincronizados con la nube', 'success');
+            }
+        }
+        updateSyncStatusUI('synced');
+    } catch (e) {
+        console.error('Error al sincronizar con Supabase:', e);
+        updateSyncStatusUI('error');
+    }
+}
+
+function updateSyncStatusUI(status) {
+    const dot = document.getElementById('sync-dot');
+    const label = document.getElementById('sync-label');
+    const rate = document.getElementById('sync-rate');
+    
+    if (!dot || !label || !rate) return;
+    
+    if (status === 'local') {
+        dot.style.background = 'rgba(255,255,255,0.4)';
+        dot.style.animation = 'none';
+        label.textContent = 'Modo Local';
+        rate.textContent = '📶';
+        rate.style.color = 'rgba(255,255,255,0.4)';
+    } else if (status === 'syncing') {
+        dot.style.background = '#f2c94c'; // Yellow
+        dot.style.animation = 'pulse 1s infinite';
+        label.textContent = 'Sincronizando...';
+        rate.textContent = '🔄';
+        rate.style.color = '#f2c94c';
+    } else if (status === 'synced') {
+        dot.style.background = '#2BBDAA'; // Muted Green
+        dot.style.animation = 'pulse 3s infinite';
+        label.textContent = 'Nube Activa';
+        rate.textContent = '☁️';
+        rate.style.color = '#2BBDAA';
+    } else if (status === 'error') {
+        dot.style.background = '#eb5757'; // Red
+        dot.style.animation = 'none';
+        label.textContent = 'Error de Sinc.';
+        rate.textContent = '⚠️';
+        rate.style.color = '#eb5757';
+    }
 }
 
 async function fetchRate() {
@@ -74,7 +228,7 @@ async function fetchRate() {
         if (data && data.promedio) {
             state.rate = data.promedio;
             updateRateUI();
-            showToast('Tasa BCV actualizada: ' + state.rate.toFixed(2) + ' Bs/$', 'info');
+            showToast('Tasa BCV oficial: ' + state.rate.toFixed(2) + ' Bs/$', 'info');
         }
     } catch (e) {
         console.error('Error fetching BCV rate', e);
@@ -98,56 +252,63 @@ function updateRateUI() {
 function renderAll() {
     renderDashboard();
     renderSales();
-    renderInventory();
-    renderCosts();
+    renderExpenses();
+    renderCobranzas();
     renderSettings();
 }
 
 function renderDashboard() {
-    const period = state.activePeriod;
-    const now = new Date();
+    const filter = state.filterMonth; // Formato "YYYY-MM" o "" para YTD (Todo)
     
     const filteredSales = state.sales.filter(s => {
+        if (!filter) return true; // Mostrar todo si es YTD
         const sDate = new Date(s.date);
-        if (period === 'today') return sDate.toDateString() === now.toDateString();
-        if (period === 'week') {
-            const weekAgo = new Date();
-            weekAgo.setDate(now.getDate() - 7);
-            return sDate >= weekAgo;
-        }
-        if (period === 'month') return sDate.getMonth() === now.getMonth() && sDate.getFullYear() === now.getFullYear();
-        return true;
+        const sYear = sDate.getFullYear();
+        const sMonth = String(sDate.getMonth() + 1).padStart(2, '0');
+        return `${sYear}-${sMonth}` === filter;
     });
 
-    // Totals
-    const income = filteredSales.reduce((sum, s) => sum + (s.price * s.qty), 0);
-    const variableCost = filteredSales.reduce((sum, s) => sum + (s.cost * s.qty), 0);
-    
-    // Fixed cost proportionally
-    let fixedCost = state.fixedCosts.reduce((sum, c) => sum + c.amount, 0);
-    if (period === 'today') fixedCost /= 30;
-    if (period === 'week') fixedCost = (fixedCost / 30) * 7;
+    const filteredExpenses = state.expenses.filter(e => {
+        if (!filter) return true; // Mostrar todo si es YTD
+        const eDate = new Date(e.date);
+        const eYear = eDate.getFullYear();
+        const eMonth = String(eDate.getMonth() + 1).padStart(2, '0');
+        return `${eYear}-${eMonth}` === filter;
+    });
 
-    const profit = income - variableCost - fixedCost;
-    const margin = income > 0 ? (profit / income) * 100 : 0;
+    // 1. Total Income (Value of all sales recorded)
+    const totalSalesValue = filteredSales.reduce((sum, s) => sum + (s.price * s.qty), 0);
+    
+    // 2. Net Cash Flow: Real Money Collected minus Money Spent
+    const moneyCollected = filteredSales.filter(s => s.status === 'CANCELADO').reduce((sum, s) => sum + (s.price * s.qty), 0);
+    const totalExpenses = filteredExpenses.reduce((sum, e) => sum + e.amount, 0);
+    const netCashflow = moneyCollected - totalExpenses;
+
+    // 3. Accounts Receivable (Deudas Pendientes)
+    const unpaidSales = state.sales.filter(s => s.status === 'PENDIENTE');
+    const totalAccountsReceivable = unpaidSales.reduce((sum, s) => sum + (s.price * s.qty), 0);
+
+    // 4. Accounting Utility (Profit): Sales Value minus Cost of Goods Sold (Unit cost * Qty)
+    const costOfGoodsSold = filteredSales.reduce((sum, s) => sum + (s.cost * s.qty), 0);
+    const realProfit = totalSalesValue - costOfGoodsSold;
+    const margin = totalSalesValue > 0 ? (realProfit / totalSalesValue) * 100 : 0;
 
     // Update KPI UI
-    document.getElementById('kpi-income').textContent = `$ ${income.toFixed(2)}`;
-    document.getElementById('kpi-income-bs').textContent = `Bs ${(income * state.rate).toLocaleString('es-VE', {minimumFractionDigits: 2})}`;
+    document.getElementById('kpi-income').textContent = `$ ${totalSalesValue.toFixed(2)}`;
+    document.getElementById('kpi-income-bs').textContent = `Bs ${(totalSalesValue * state.rate).toLocaleString('es-VE', {minimumFractionDigits: 2})}`;
     
-    document.getElementById('kpi-cost-var').textContent = `$ ${variableCost.toFixed(2)}`;
-    document.getElementById('kpi-cost-var-bs').textContent = `Bs ${(variableCost * state.rate).toLocaleString('es-VE', {minimumFractionDigits: 2})}`;
-    
-    document.getElementById('kpi-cost-fixed').textContent = `$ ${fixedCost.toFixed(2)}`;
-    document.getElementById('kpi-cost-fixed-bs').textContent = `Bs ${(fixedCost * state.rate).toLocaleString('es-VE', {minimumFractionDigits: 2})}`;
+    document.getElementById('kpi-cost-var').textContent = `$ ${totalExpenses.toFixed(2)}`;
+    document.getElementById('kpi-cost-var-bs').textContent = `Bs ${(totalExpenses * state.rate).toLocaleString('es-VE', {minimumFractionDigits: 2})}`;
     
     const profitEl = document.getElementById('kpi-profit');
-    profitEl.textContent = `$ ${profit.toFixed(2)}`;
-    profitEl.parentElement.style.borderColor = profit >= 0 ? 'var(--aqua)' : 'var(--danger)';
-    document.getElementById('kpi-profit-bs').textContent = `Bs ${(profit * state.rate).toLocaleString('es-VE', {minimumFractionDigits: 2})}`;
+    profitEl.textContent = `$ ${realProfit.toFixed(2)}`;
+    profitEl.parentElement.style.borderColor = realProfit >= 0 ? 'var(--aqua)' : 'var(--danger)';
+    document.getElementById('kpi-profit-bs').textContent = `Bs ${(realProfit * state.rate).toLocaleString('es-VE', {minimumFractionDigits: 2})}`;
 
     const stockEl = document.getElementById('kpi-stock');
-    if (stockEl) stockEl.textContent = state.inventory;
+    if (stockEl) stockEl.textContent = `$ ${totalAccountsReceivable.toFixed(2)}`;
+    const stockBsEl = document.getElementById('kpi-stock-bs');
+    if (stockBsEl) stockBsEl.textContent = `Bs ${(totalAccountsReceivable * state.rate).toLocaleString('es-VE', {minimumFractionDigits: 2})}`;
 
     // Margin Card
     const marginCard = document.getElementById('margin-card');
@@ -156,14 +317,14 @@ function renderDashboard() {
     
     marginPctEl.textContent = `${margin.toFixed(1)}%`;
     
-    if (income === 0) {
+    if (totalSalesValue === 0) {
         marginCard.style.background = 'var(--choco-mid)';
         marginStatus.textContent = "Registra ventas para ver tu rendimiento";
     } else if (margin >= 0) {
         marginCard.style.background = 'var(--aqua)';
-        if (margin > 30) marginStatus.textContent = "¡Excelente rendimiento! Tu negocio es muy rentable.";
-        else if (margin > 15) marginStatus.textContent = "Buen margen, pero vigila tus costos variables.";
-        else marginStatus.textContent = "Margen bajo. Considera revisar tus precios o reducir costos.";
+        if (margin > 35) marginStatus.textContent = "¡Excelente rendimiento! Tu negocio es sumamente rentable.";
+        else if (margin > 20) marginStatus.textContent = "Buen margen de ganancia. Mantén los costos bajo control.";
+        else marginStatus.textContent = "Margen de ganancia aceptable, pero revisa tus costos variables.";
     } else {
         marginCard.style.background = 'var(--danger)';
         marginStatus.textContent = "⚠️ Operando a pérdida. Revisa tus costos fijos y precios.";
@@ -189,25 +350,43 @@ function renderSales() {
     const empty = document.getElementById('sales-empty');
     if (!list) return;
 
-    if (state.sales.length === 0) {
+    const filter = state.filterMonth;
+    const filteredSales = state.sales.filter(s => {
+        if (!filter) return true; // Mostrar todo si es YTD
+        const sDate = new Date(s.date);
+        const sYear = sDate.getFullYear();
+        const sMonth = String(sDate.getMonth() + 1).padStart(2, '0');
+        return `${sYear}-${sMonth}` === filter;
+    });
+
+    if (filteredSales.length === 0) {
         list.parentElement.parentElement.style.display = 'none';
         empty.style.display = 'flex';
+        const emptyMsg = empty.querySelector('p');
+        if (emptyMsg) {
+            emptyMsg.textContent = state.sales.length > 0 ? 'No hay ventas registradas en el mes seleccionado.' : 'Registra tu primera venta para comenzar el control.';
+        }
         return;
     }
 
     list.parentElement.parentElement.style.display = 'block';
     empty.style.display = 'none';
 
-    list.innerHTML = state.sales.slice().reverse().map(s => {
+    list.innerHTML = filteredSales.slice().reverse().map(s => {
         const p = state.products.find(prod => prod.id === s.productId);
         const dateStr = new Date(s.date).toLocaleDateString('es-VE', { day: '2-digit', month: 'short' });
+        const statusClass = s.status === 'CANCELADO' ? 'status-paid' : 'status-pending';
+        const statusLabel = s.status === 'CANCELADO' ? 'PAGADO' : 'PENDIENTE';
+        
         return `
             <tr>
                 <td>${dateStr}</td>
-                <td style="font-weight: 500;">${p ? p.emoji + ' ' + p.name : 'Desc.'}</td>
+                <td style="font-weight: 600;">${s.clientName || 'Cliente Genérico'}</td>
+                <td style="font-size: 13px;">${p ? p.emoji + ' ' + p.name : 'Desc.'}</td>
                 <td>${s.qty}</td>
-                <td style="color: var(--aqua); font-weight: 600;">$ ${(s.price * s.qty).toFixed(2)}</td>
-                <td style="font-size: 11px; color: var(--text-mid);">${s.rate.toFixed(2)} Bs</td>
+                <td style="color: var(--aqua); font-weight: 700;">$ ${(s.price * s.qty).toFixed(2)}</td>
+                <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
+                <td style="font-size: 11px; color: var(--text-mid); font-family: monospace;">${s.documentNumber || 'S/F'}</td>
                 <td class="flex gap-12">
                     <button class="btn-icon" onclick="editSale(${s.id})"><span>✏️</span></button>
                     <button class="btn-icon" onclick="deleteSale(${s.id})"><span>🗑️</span></button>
@@ -217,68 +396,108 @@ function renderSales() {
     }).join('');
 }
 
-function renderInventory() {
-    const totalEl = document.getElementById('inv-total-display');
-    const traysEl = document.getElementById('inv-trays-display');
-    const unitsEl = document.getElementById('inv-units-display');
+function renderExpenses() {
     const prodList = document.getElementById('prod-list');
+    if (!prodList) return;
 
-    if (!totalEl) return;
+    const filter = state.filterMonth;
+    const filteredExpenses = state.expenses.filter(e => {
+        if (!filter) return true; // Mostrar todo si es YTD
+        const eDate = new Date(e.date);
+        const eYear = eDate.getFullYear();
+        const eMonth = String(eDate.getMonth() + 1).padStart(2, '0');
+        return `${eYear}-${eMonth}` === filter;
+    });
 
-    totalEl.textContent = state.inventory;
-    traysEl.textContent = Math.floor(state.inventory / 9);
-    unitsEl.textContent = state.inventory % 9;
+    if (filteredExpenses.length === 0) {
+        prodList.innerHTML = `
+            <tr>
+                <td colspan="5" style="text-align: center; color: var(--text-light); padding: 30px;">
+                    No hay gastos registrados en el mes seleccionado.
+                </td>
+            </tr>
+        `;
+        return;
+    }
 
-    prodList.innerHTML = state.production.slice().reverse().map(p => {
-        const units = p.qty * 9;
+    prodList.innerHTML = filteredExpenses.slice().reverse().map(e => {
+        const dateStr = new Date(e.date).toLocaleDateString('es-VE', { day: '2-digit', month: 'short' });
         return `
             <tr>
-                <td>${new Date(p.date).toLocaleDateString('es-VE', { day: '2-digit', month: 'short' })}</td>
-                <td>🔥 Horneado</td>
-                <td style="font-weight: 600;">+ ${units} unid.</td>
-                <td style="color: var(--choco-mid);">$ ${(p.cost * p.qty).toFixed(2)}</td>
+                <td>${dateStr}</td>
+                <td style="font-weight: 500;">🛒 ${e.description}</td>
+                <td style="font-weight: 600; color: var(--danger);">$ ${e.amount.toFixed(2)}</td>
+                <td style="color: var(--text-mid); font-size: 12px;">Bs ${(e.amount * state.rate).toLocaleString('es-VE', {minimumFractionDigits: 2})}</td>
                 <td class="flex gap-12">
-                    <button class="btn-icon" onclick="editProduction(${p.id})"><span>✏️</span></button>
-                    <button class="btn-icon" onclick="deleteProduction(${p.id})"><span>🗑️</span></button>
+                    <button class="btn-icon" onclick="editExpense(${e.id})"><span>✏️</span></button>
+                    <button class="btn-icon" onclick="deleteExpense(${e.id})"><span>🗑️</span></button>
                 </td>
             </tr>
         `;
     }).join('');
 }
 
-function renderCosts() {
-    // Fixed Costs
-    const fixedList = document.getElementById('fixed-costs-list');
-    if (fixedList) {
-        fixedList.innerHTML = state.fixedCosts.map(c => `
-            <div class="cost-item">
-                <div class="cost-info">
-                    <span class="cost-name">${c.desc}</span>
-                    <span class="cost-cycle">Mensual</span>
-                </div>
-                <div class="flex items-center gap-10">
-                    <span class="cost-amount">$ ${c.amount.toFixed(2)}</span>
-                    <button class="btn-icon" onclick="deleteCost(${c.id})">🗑️</button>
-                </div>
+function renderCobranzas() {
+    const grid = document.getElementById('cobranzas-grid');
+    if (!grid) return;
+
+    // Group pending sales by client name
+    const pendingSales = state.sales.filter(s => s.status === 'PENDIENTE');
+    const clients = {};
+    
+    pendingSales.forEach(s => {
+        const client = s.clientName || 'Cliente Genérico';
+        if (!clients[client]) {
+            clients[client] = {
+                totalDebt: 0,
+                orders: []
+            };
+        }
+        clients[client].totalDebt += (s.price * s.qty);
+        clients[client].orders.push(s);
+    });
+
+    const clientKeys = Object.keys(clients);
+
+    if (clientKeys.length === 0) {
+        grid.innerHTML = `
+            <div style="grid-column: 1 / -1; text-align: center; padding: 40px; background: rgba(43, 189, 170, 0.05); border-radius: 12px; border: 1px dashed var(--aqua);">
+                <span style="font-size: 32px;">🎉</span>
+                <h3 style="margin-top: 10px; color: var(--choco);">¡Sin cuentas pendientes!</h3>
+                <p style="color: var(--text-mid); font-size: 14px;">Todos los aliados y clientes están al día con sus pagos.</p>
             </div>
-        `).join('');
+        `;
+        return;
     }
 
-    // Ingredients
-    const ingList = document.getElementById('ingredients-list');
-    if (ingList) {
-        ingList.innerHTML = state.ingredients.map((i, idx) => `
-            <div class="ing-card" style="display: flex; align-items: center; justify-content: space-between;">
-                <div class="ing-name" style="flex: 1;">${i.name}</div>
-                <div class="flex items-center gap-5">
-                    <span style="font-size: 14px; font-weight: 700; color: var(--aqua);">$</span>
-                    <input type="number" step="0.01" value="${i.cost.toFixed(2)}" 
-                        onchange="updateIngredientCost(${idx}, this.value)"
-                        class="ing-price-input">
+    grid.innerHTML = clientKeys.map(client => {
+        const c = clients[client];
+        const ordersList = c.orders.map(o => {
+            const p = state.products.find(prod => prod.id === o.productId);
+            const dateStr = new Date(o.date).toLocaleDateString('es-VE', { day: '2-digit', month: 'short' });
+            return `<li>${dateStr} - ${o.qty}x ${p ? p.name : 'Desc'} ($ ${(o.price * o.qty).toFixed(2)})</li>`;
+        }).join('');
+
+        return `
+            <div class="cobranzas-card">
+                <div>
+                    <div class="cobranzas-header">
+                        <span class="cobranzas-client">${client}</span>
+                        <span class="cobranzas-amount">$ ${c.totalDebt.toFixed(2)}</span>
+                    </div>
+                    <div class="cobranzas-bs">
+                        Bs ${(c.totalDebt * state.rate).toLocaleString('es-VE', {minimumFractionDigits: 2})}
+                    </div>
+                    <ul class="cobranzas-orders">
+                        ${ordersList}
+                    </ul>
                 </div>
+                <button class="btn btn-primary btn-sm" onclick="liquidateClientDebt('${client.replace(/'/g, "\\'")}')">
+                    💰 Registrar Pago Completo
+                </button>
             </div>
-        `).join('');
-    }
+        `;
+    }).join('');
 }
 
 function renderSettings() {
@@ -305,7 +524,6 @@ function renderSettings() {
 // --- ACTIONS ---
 
 function showModal(id, isEdit = false) {
-    console.log('Opening modal:', id);
     const el = document.getElementById(id);
     if (el) {
         if (!isEdit) {
@@ -314,21 +532,23 @@ function showModal(id, isEdit = false) {
                 document.getElementById('edit-sale-id').value = '';
                 document.getElementById('sale-modal-title').textContent = 'Registrar Venta';
                 document.getElementById('sale-save-btn').textContent = 'Guardar Venta';
+                document.getElementById('sale-client').value = '';
                 document.getElementById('sale-qty').value = 1;
+                document.getElementById('sale-status').value = 'CANCELADO';
+                document.getElementById('sale-doc').value = '';
             }
             if (id === 'bake-modal') {
                 document.getElementById('edit-bake-id').value = '';
-                document.getElementById('bake-modal-title').textContent = 'Registrar Horneado';
-                document.getElementById('bake-qty').value = 1;
+                document.getElementById('bake-modal-title').textContent = 'Registrar Gasto / Compra';
+                document.getElementById('bake-name').value = '';
+                document.getElementById('bake-qty').value = 0.00;
             }
         }
         el.classList.add('show');
     }
-    else console.error('Modal not found:', id);
 }
 
 function hideModal(id) {
-    console.log('Closing modal:', id);
     const el = document.getElementById(id);
     if (el) el.classList.remove('show');
 }
@@ -345,59 +565,48 @@ document.querySelectorAll('.product-pick-card').forEach(card => {
 
 function saveSale() {
     const editId = document.getElementById('edit-sale-id').value;
+    const client = document.getElementById('sale-client').value.trim() || 'Cliente Genérico';
     const qty = parseInt(document.getElementById('sale-qty').value);
+    const status = document.getElementById('sale-status').value;
+    const doc = document.getElementById('sale-doc').value.trim() || 'S/F';
     const rate = parseFloat(document.getElementById('sale-rate').value);
     const product = state.products.find(p => p.id === selectedProductId);
 
     if (!qty || qty <= 0) return showToast('Cantidad inválida', 'error');
 
-    const unitsNeeded = selectedProductId === 3 ? qty : qty * 9;
-
     if (editId) {
         // Mode: Update
         const oldSale = state.sales.find(s => s.id == editId);
-        const oldUnits = oldSale.productId === 3 ? oldSale.qty : oldSale.qty * 9;
-        
-        // Revert old units first
-        state.inventory += oldUnits;
-        
-        // Check new stock
-        if (state.inventory < unitsNeeded) {
-            if (!confirm(`⚠️ Solo tienes ${state.inventory} brownies. ¿Vender de todos modos?`)) {
-                state.inventory -= oldUnits; // restore to before edit attempt
-                return;
-            }
-        }
-        
-        state.inventory -= unitsNeeded;
-        if (state.inventory < 0) state.inventory = 0;
-
         oldSale.productId = selectedProductId;
+        oldSale.clientName = client.toUpperCase();
         oldSale.qty = qty;
         oldSale.price = product.price;
         oldSale.cost = product.cost;
+        oldSale.status = status;
+        oldSale.documentNumber = doc.toUpperCase();
         oldSale.rate = rate || state.rate;
-        
+        if (status === 'CANCELADO' && !oldSale.paymentDate) {
+            oldSale.paymentDate = new Date().toISOString();
+        }
         showToast('Venta actualizada', 'success');
     } else {
         // Mode: Create
-        if (state.inventory < unitsNeeded) {
-            if (!confirm(`⚠️ Solo tienes ${state.inventory} brownies. ¿Vender de todos modos?`)) return;
-        }
-
         const newSale = {
             id: Date.now(),
             productId: selectedProductId,
+            clientName: client.toUpperCase(),
             qty: qty,
             price: product.price,
             cost: product.cost,
             rate: rate || state.rate,
+            status: status,
+            documentNumber: doc.toUpperCase(),
+            paymentDate: status === 'CANCELADO' ? new Date().toISOString() : '',
+            transferNumber: '',
             date: new Date().toISOString()
         };
 
         state.sales.push(newSale);
-        state.inventory -= unitsNeeded;
-        if (state.inventory < 0) state.inventory = 0;
         showToast('Venta registrada', 'success');
     }
 
@@ -415,7 +624,10 @@ function editSale(id) {
     document.getElementById('sale-modal-title').textContent = 'Editar Venta';
     document.getElementById('sale-save-btn').textContent = 'Actualizar Venta';
     
+    document.getElementById('sale-client').value = sale.clientName;
     document.getElementById('sale-qty').value = sale.qty;
+    document.getElementById('sale-status').value = sale.status;
+    document.getElementById('sale-doc').value = sale.documentNumber;
     document.getElementById('sale-rate').value = sale.rate;
     
     // Select product in picker
@@ -427,31 +639,36 @@ function editSale(id) {
     showModal('sale-modal', true);
 }
 
+function deleteSale(id) {
+    if (window.confirm('¿Eliminar esta venta?')) {
+        state.sales = state.sales.filter(s => s.id != id);
+        saveState();
+        renderAll();
+        updateChart();
+        showToast('Venta eliminada', 'info');
+    }
+}
+
 function saveBake() {
     const editId = document.getElementById('edit-bake-id').value;
-    const qty = parseInt(document.getElementById('bake-qty').value);
-    if (!qty || qty <= 0) return;
+    const desc = document.getElementById('bake-name').value.trim() || 'Gasto General';
+    const amount = parseFloat(document.getElementById('bake-qty').value);
+    
+    if (isNaN(amount) || amount <= 0) return showToast('Monto inválido', 'error');
 
     if (editId) {
-        const oldProd = state.production.find(p => p.id == editId);
-        // Revert old stock
-        state.inventory -= (oldProd.qty * 9);
-        // Add new stock
-        state.inventory += (qty * 9);
-        if (state.inventory < 0) state.inventory = 0;
-        
-        oldProd.qty = qty;
-        showToast('Horneado actualizado', 'success');
+        const oldExpense = state.expenses.find(e => e.id == editId);
+        oldExpense.description = desc;
+        oldExpense.amount = amount;
+        showToast('Gasto actualizado', 'success');
     } else {
-        const currentBatchCost = state.ingredients.reduce((sum, ing) => sum + ing.cost, 0);
-        state.production.push({
+        state.expenses.push({
             id: Date.now(),
-            qty: qty,
-            cost: currentBatchCost, 
+            description: desc,
+            amount: amount, 
             date: new Date().toISOString()
         });
-        state.inventory += (qty * 9);
-        showToast(`🔥 ${qty} batch(es) horneados`, 'success');
+        showToast('🛒 Gasto registrado exitosamente', 'success');
     }
 
     saveState();
@@ -459,77 +676,46 @@ function saveBake() {
     hideModal('bake-modal');
 }
 
-function editProduction(id) {
-    const prod = state.production.find(p => p.id === id);
-    if (!prod) return;
+function editExpense(id) {
+    const exp = state.expenses.find(e => e.id === id);
+    if (!exp) return;
 
-    document.getElementById('edit-bake-id').value = prod.id;
-    document.getElementById('bake-modal-title').textContent = 'Editar Horneado';
-    document.getElementById('bake-qty').value = prod.qty;
+    document.getElementById('edit-bake-id').value = exp.id;
+    document.getElementById('bake-modal-title').textContent = 'Editar Gasto';
+    document.getElementById('bake-name').value = exp.description;
+    document.getElementById('bake-qty').value = exp.amount;
 
     showModal('bake-modal', true);
 }
 
-function updateIngredientCost(idx, newVal) {
-    state.ingredients[idx].cost = parseFloat(newVal) || 0;
-    saveState();
-    renderDashboard(); // Update income/cost stats if affected
-    showToast(`Costo de ${state.ingredients[idx].name} actualizado`, 'info');
-}
-
-function deleteSale(id) {
-    console.log('Delete sale requested for ID:', id);
-    if (window.confirm('¿Eliminar esta venta?')) {
-        const sale = state.sales.find(s => s.id == id);
-        if (sale) {
-            const unitsToRestore = sale.productId === 3 ? sale.qty : sale.qty * 9;
-            state.inventory += unitsToRestore;
-            state.sales = state.sales.filter(s => s.id != id);
-            saveState();
-            renderAll();
-            updateChart();
-            showToast('Venta eliminada y stock restaurado', 'info');
-        } else {
-            console.error('Sale not found for ID:', id);
-        }
+function deleteExpense(id) {
+    if (window.confirm('¿Eliminar este gasto?')) {
+        state.expenses = state.expenses.filter(e => e.id != id);
+        saveState();
+        renderAll();
+        showToast('Gasto eliminado', 'info');
     }
 }
 
-function deleteProduction(id) {
-    console.log('Delete production requested for ID:', id);
-    if (window.confirm('¿Eliminar este registro de horneado? Esto restará los brownies del stock.')) {
-        const prod = state.production.find(p => p.id == id);
-        if (prod) {
-            const unitsToRemove = prod.qty * 9;
-            state.inventory -= unitsToRemove;
-            if (state.inventory < 0) state.inventory = 0;
-            state.production = state.production.filter(p => p.id != id);
-            saveState();
-            renderAll();
-            showToast('Horneado eliminado y stock actualizado', 'info');
-        } else {
-            console.error('Production not found for ID:', id);
+function liquidateClientDebt(client) {
+    const ref = prompt(`Introduzca número de referencia bancaria o pago móvil para el pago de ${client}:`);
+    if (ref === null) return; // Cancelled
+    
+    let count = 0;
+    state.sales.forEach(s => {
+        if (s.clientName === client && s.status === 'PENDIENTE') {
+            s.status = 'CANCELADO';
+            s.paymentDate = new Date().toISOString();
+            s.transferNumber = ref;
+            count++;
         }
+    });
+
+    if (count > 0) {
+        saveState();
+        renderAll();
+        showToast(`¡Se registraron ${count} facturas de ${client} como CANCELADAS!`, 'success');
     }
-}
-
-function saveCost() {
-    const desc = document.getElementById('cost-desc').value;
-    const amount = parseFloat(document.getElementById('cost-amount').value);
-
-    if (!desc || isNaN(amount)) return showToast('Completa los campos', 'error');
-
-    state.fixedCosts.push({ id: Date.now(), desc, amount });
-    saveState();
-    renderAll();
-    hideModal('cost-modal');
-    showToast('Costo fijo añadido', 'success');
-}
-
-function deleteCost(id) {
-    state.fixedCosts = state.fixedCosts.filter(c => c.id !== id);
-    saveState();
-    renderAll();
 }
 
 function updateProductPrice(id, newPrice) {
@@ -545,9 +731,133 @@ function updateProductPrice(id, newPrice) {
 function resetAllData() {
     if (confirm('⚠️ ¿Estás segura de que quieres borrar TODO? Esta acción no se puede deshacer.')) {
         state.sales = [];
-        state.fixedCosts = [...CONFIG.DEFAULTS.fixedCosts];
+        state.expenses = [];
         saveState();
         window.location.reload();
+    }
+}
+
+// --- TEST DATA LOADER (Mayo 2026 / Abril 2026 - Conforme a tu Excel real) ---
+
+function loadTestData(silent = false) {
+    // 1. Clear current
+    state.sales = [];
+    state.expenses = [];
+    state.rate = 37.50;
+
+    // 2. Add April Sales
+    const aprilSales = [
+        { client: 'VESUVIO', pid: 4, qty: 18, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 450', date: '2026-04-02T12:00:00Z' },
+        { client: 'CRASH', pid: 4, qty: 6, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 451', date: '2026-04-02T14:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 15, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 454', date: '2026-04-04T12:00:00Z' },
+        { client: 'CRASH', pid: 4, qty: 6, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 455', date: '2026-04-07T10:00:00Z' },
+        { client: 'ONBIKE', pid: 4, qty: 24, price: 2.50, status: 'CANCELADO', doc: 'S/F', date: '2026-04-08T11:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 18, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 456', date: '2026-04-11T12:00:00Z' },
+        { client: 'ONBIKE', pid: 4, qty: 10, price: 2.50, status: 'CANCELADO', doc: 'S/F', date: '2026-04-13T10:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 18, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 457', date: '2026-04-13T12:00:00Z' },
+        { client: 'LA DONA', pid: 4, qty: 9, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 458', date: '2026-04-16T09:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 18, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 460', date: '2026-04-16T12:00:00Z' },
+        { client: 'CRASH', pid: 4, qty: 6, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 461', date: '2026-04-16T14:00:00Z' },
+        { client: 'LIFE FITNESS', pid: 4, qty: 10, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 462', date: '2026-04-17T09:00:00Z' },
+        { client: 'NAILS', pid: 4, qty: 16, price: 2.50, status: 'CANCELADO', doc: 'S/F', date: '2026-04-17T11:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 16, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 463', date: '2026-04-18T12:00:00Z' },
+        { client: 'NAILS', pid: 4, qty: 8, price: 2.50, status: 'CANCELADO', doc: 'S/F', date: '2026-04-20T10:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 17, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 464', date: '2026-04-20T12:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 14, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 465', date: '2026-04-23T12:00:00Z' },
+        { client: 'CRASH', pid: 4, qty: 6, price: 2.50, status: 'PENDIENTE', doc: 'FACTURA 466', date: '2026-04-23T14:00:00Z' },
+        { client: 'ONBIKE', pid: 4, qty: 10, price: 2.50, status: 'CANCELADO', doc: 'S/F', date: '2026-04-23T15:00:00Z' },
+        { client: 'NAILS', pid: 4, qty: 9, price: 2.50, status: 'CANCELADO', doc: 'S/F', date: '2026-04-28T10:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 10, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 467', date: '2026-04-27T12:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 13, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 468', date: '2026-04-29T12:00:00Z' },
+        { client: 'CRASH', pid: 4, qty: 6, price: 2.50, status: 'PENDIENTE', doc: 'FACTURA 469', date: '2026-04-30T10:00:00Z' },
+        { client: 'LIFE FITNESS', pid: 4, qty: 18, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 470', date: '2026-04-30T11:00:00Z' },
+        { client: 'ONBIKE', pid: 4, qty: 10, price: 2.50, status: 'CANCELADO', doc: 'S/F', date: '2026-04-30T15:00:00Z' }
+    ];
+
+    // April Individual
+    const aprilIndividualSales = [
+        { client: 'HADIL MAKLAD', pid: 3, qty: 2, price: 3.00, status: 'CANCELADO', doc: 'S/F', date: '2026-04-05T12:00:00Z' },
+        { client: 'BUBA', pid: 3, qty: 5, price: 3.00, status: 'CANCELADO', doc: 'S/F', date: '2026-04-07T12:00:00Z' },
+        { client: 'VERONICA', pid: 3, qty: 4, price: 3.00, status: 'CANCELADO', doc: 'S/F', date: '2026-04-10T12:00:00Z' },
+        { client: 'JORDANIA', pid: 3, qty: 3, price: 3.00, status: 'CANCELADO', doc: 'S/F', date: '2026-04-15T12:00:00Z' },
+        { client: 'VERONICA', pid: 3, qty: 5, price: 3.00, status: 'CANCELADO', doc: 'S/F', date: '2026-04-20T12:00:00Z' },
+        { client: 'MARIAN', pid: 3, qty: 2, price: 3.00, status: 'CANCELADO', doc: 'S/F', date: '2026-04-22T12:00:00Z' },
+        { client: 'GUSTAVO', pid: 3, qty: 2, price: 3.00, status: 'CANCELADO', doc: 'S/F', date: '2026-04-25T12:00:00Z' },
+        { client: 'CARLOS ALVAREZ', pid: 3, qty: 3, price: 3.00, status: 'CANCELADO', doc: 'S/F', date: '2026-04-28T12:00:00Z' }
+    ];
+
+    // 3. Add May Sales
+    const maySales = [
+        { client: 'NAILS', pid: 4, qty: 7, price: 2.50, status: 'PENDIENTE', doc: 'S/F', date: '2026-05-01T10:00:00Z' },
+        { client: 'ON BIKE', pid: 4, qty: 9, price: 2.50, status: 'PENDIENTE', doc: 'S/F', date: '2026-05-01T12:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 18, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 471', date: '2026-05-02T12:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 18, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 472', date: '2026-05-05T12:00:00Z' },
+        { client: 'LA DONA', pid: 4, qty: 9, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 473', date: '2026-05-06T09:00:00Z' },
+        { client: 'LIFE FITNESS', pid: 4, qty: 9, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 474', date: '2026-05-06T11:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 18, price: 2.50, status: 'CANCELADO', doc: 'FACTURA 475', date: '2026-05-08T12:00:00Z' },
+        { client: 'LIFE FITNESS', pid: 4, qty: 6, price: 2.50, status: 'PENDIENTE', doc: 'S/F', date: '2026-05-07T11:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 18, price: 2.50, status: 'PENDIENTE', doc: 'FACTURA 476', date: '2026-05-11T12:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 10, price: 2.50, status: 'PENDIENTE', doc: 'FACTURA 477', date: '2026-05-14T12:00:00Z' },
+        { client: 'CRASH', pid: 4, qty: 6, price: 2.50, status: 'PENDIENTE', doc: 'FACTURA 478', date: '2026-05-14T14:00:00Z' },
+        { client: 'VESUVIO', pid: 4, qty: 12, price: 2.50, status: 'PENDIENTE', doc: 'FACTURA 479', date: '2026-05-15T12:00:00Z' },
+        { client: 'LIFE FITNESS', pid: 4, qty: 8, price: 2.50, status: 'PENDIENTE', doc: 'S/F', date: '2026-05-18T10:00:00Z' }
+    ];
+
+    // May Individual
+    const mayIndividualSales = [
+        { client: 'OMAR ESPINOZA', pid: 3, qty: 20, price: 3.00, status: 'PENDIENTE', doc: 'S/F', date: '2026-05-15T12:00:00Z' },
+        { client: 'CLIENTE X', pid: 3, qty: 7, price: 3.00, status: 'CANCELADO', doc: 'S/F', date: '2026-05-17T12:00:00Z' }
+    ];
+
+    // Combine Sales
+    const allSales = [...aprilSales, ...aprilIndividualSales, ...maySales, ...mayIndividualSales];
+    allSales.forEach((s, idx) => {
+        const prod = state.products.find(p => p.id === s.pid);
+        state.sales.push({
+            id: idx + 1,
+            productId: s.pid,
+            clientName: s.client.toUpperCase(),
+            qty: s.qty,
+            price: s.price,
+            cost: prod ? prod.cost : 1.67,
+            rate: 37.50,
+            status: s.status,
+            documentNumber: s.doc,
+            paymentDate: s.status === 'CANCELADO' ? s.date : '',
+            transferNumber: s.status === 'CANCELADO' ? '12345678' : '',
+            date: s.date
+        });
+    });
+
+    // 4. Add Real Expenses from Excel
+    const aprilExpenses = [
+        { description: 'Harina de Almendra (Compra)', amount: 198.18, date: '2026-04-03T10:00:00Z' },
+        { description: 'Compra Costco General', amount: 285.00, date: '2026-04-10T12:00:00Z' },
+        { description: 'Etiquetas de Presentación', amount: 32.00, date: '2026-04-15T10:00:00Z' },
+        { description: 'Polvo de Hornear', amount: 11.00, date: '2026-04-20T11:00:00Z' },
+        { description: 'Inventario Wladiador', amount: 24.00, date: '2026-04-22T14:00:00Z' }
+    ];
+
+    const mayExpenses = [
+        { description: 'Polvo de Hornear', amount: 12.00, date: '2026-05-02T11:00:00Z' },
+        { description: 'Chocolates SUN (Materia Prima)', amount: 230.00, date: '2026-05-06T14:00:00Z' }
+    ];
+
+    const allExpenses = [...aprilExpenses, ...mayExpenses];
+    allExpenses.forEach((e, idx) => {
+        state.expenses.push({
+            id: idx + 100,
+            description: e.description,
+            amount: e.amount,
+            date: e.date
+        });
+    });
+
+    saveState();
+    if (!silent) {
+        renderAll();
+        updateChart();
+        showToast('Datos reales de Abril y Mayo cargados con éxito.', 'success');
     }
 }
 
@@ -569,27 +879,6 @@ function setupEventListeners() {
             switchPage(page);
         });
     });
-
-    // Period Tabs
-    document.querySelectorAll('.period-tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            document.querySelectorAll('.period-tab').forEach(t => t.classList.remove('active'));
-            tab.classList.add('active');
-            state.activePeriod = tab.dataset.period;
-            renderDashboard();
-        });
-    });
-
-    // Cost Tabs
-    document.querySelectorAll('.cost-tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            document.querySelectorAll('.cost-tab').forEach(t => t.classList.remove('active'));
-            tab.classList.add('active');
-            const target = tab.dataset.tab;
-            document.getElementById('cost-fixed-section').style.display = target === 'fixed' ? 'block' : 'none';
-            document.getElementById('cost-ingredients-section').style.display = target === 'ingredients' ? 'block' : 'none';
-        });
-    });
 }
 
 function switchPage(page) {
@@ -604,15 +893,63 @@ function switchPage(page) {
         el.style.display = el.id === `page-${page}` ? 'block' : 'none';
     });
 
-    const titles = { dashboard: 'Dashboard', sales: 'Ventas', inventory: 'Inventario', costs: 'Costos', settings: 'Ajustes' };
+    const titles = { dashboard: 'Dashboard', sales: 'Ventas', inventory: 'Gastos', cobranzas: 'Cobranzas', settings: 'Ajustes' };
     document.getElementById('page-title').textContent = titles[page];
+    
+    // Mostrar/Ocultar el filtro de calendario global
+    const filterContainer = document.getElementById('global-filter-container');
+    if (filterContainer) {
+        const pagesWithFilter = ['dashboard', 'sales', 'inventory'];
+        filterContainer.style.display = pagesWithFilter.includes(page) ? 'flex' : 'none';
+    }
+}
+
+// --- GLOBAL FILTER HANDLERS ---
+
+function handleMonthFilterChange(val) {
+    state.filterMonth = val; // Formato "YYYY-MM" o vacío
+    
+    // Cambiar visualmente el botón de YTD si hay filtro o no
+    const btnYtd = document.getElementById('btn-ytd');
+    if (btnYtd) {
+        if (state.filterMonth) {
+            btnYtd.classList.remove('btn-primary');
+            btnYtd.classList.add('btn-secondary');
+        } else {
+            btnYtd.classList.remove('btn-secondary');
+            btnYtd.classList.add('btn-primary');
+        }
+    }
+    
+    // Re-renderizar todo
+    renderAll();
+    updateChart();
+    
+    // Guardar estado localmente (mantiene el filtro del mes seleccionado de forma persistente en esta sesión de dispositivo)
+    saveState();
+}
+
+function selectYTD() {
+    const input = document.getElementById('global-month-filter');
+    if (input) input.value = '';
+    handleMonthFilterChange('');
 }
 
 // --- CHART ---
 
 let mainChart;
 function initChart() {
-    const ctx = document.getElementById('mainChart').getContext('2d');
+    const canvas = document.getElementById('mainChart');
+    if (!canvas) return;
+    if (typeof Chart === 'undefined') {
+        console.warn('ChartJS not loaded');
+        const container = canvas.parentElement;
+        if (container) {
+            container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-mid);font-weight:600;font-size:14px;">📈 Gráficos no disponibles (Modo Offline)</div>';
+        }
+        return;
+    }
+    const ctx = canvas.getContext('2d');
     
     mainChart = new Chart(ctx, {
         type: 'line',
@@ -628,8 +965,8 @@ function initChart() {
                     tension: 0.4
                 },
                 {
-                    label: 'Costos ($)',
-                    borderColor: '#7A3E10',
+                    label: 'Gastos ($)',
+                    borderColor: '#eb5757',
                     backgroundColor: 'transparent',
                     data: [],
                     borderDash: [5, 5],
@@ -653,62 +990,70 @@ function initChart() {
 }
 
 function updateChart() {
-    if (!mainChart) return;
+    if (typeof Chart === 'undefined' || !mainChart) return;
 
     const labels = [];
     const incomeData = [];
     const costData = [];
-    const period = state.activePeriod;
-    const now = new Date();
+    const filter = state.filterMonth;
 
-    const periodNames = { today: 'Hoy', week: 'Esta Semana', month: 'Últimos 30 días', year: 'Este Año', todo: 'Todo el Histórico' };
-    document.getElementById('chart-title').textContent = `Ventas vs Costos (${periodNames[period]})`;
+    if (filter) {
+        // Graficar día a día del mes seleccionado
+        const [year, month] = filter.split('-');
+        const dateObj = new Date(parseInt(year), parseInt(month) - 1, 1);
+        const monthName = dateObj.toLocaleDateString('es-VE', { month: 'long', year: 'numeric' });
+        document.getElementById('chart-title').textContent = `Ventas vs Costos (${monthName.toUpperCase()})`;
 
-    if (period === 'today') {
-        for (let i = 23; i >= 0; i -= 2) {
-            const d = new Date(now);
-            d.setHours(now.getHours() - i);
-            labels.push(d.getHours() + ':00');
-            const hourSales = state.sales.filter(s => {
-                const sd = new Date(s.date);
-                return sd.toDateString() === d.toDateString() && sd.getHours() === d.getHours();
-            });
-            incomeData.push(hourSales.reduce((sum, s) => sum + (s.price * s.qty), 0));
-            costData.push(hourSales.reduce((sum, s) => sum + (s.cost * s.qty), 0));
-        }
-    } else if (period === 'week') {
-        for (let i = 6; i >= 0; i--) {
-            const d = new Date(now);
-            d.setDate(now.getDate() - i);
-            labels.push(d.toLocaleDateString('es-VE', { weekday: 'short' }));
-            const daySales = state.sales.filter(s => new Date(s.date).toDateString() === d.toDateString());
-            incomeData.push(daySales.reduce((sum, s) => sum + (s.price * s.qty), 0));
-            costData.push(daySales.reduce((sum, s) => sum + (s.cost * s.qty), 0));
-        }
-    } else if (period === 'month') {
-        for (let i = 29; i >= 0; i -= 3) {
-            const d = new Date(now);
-            d.setDate(now.getDate() - i);
-            labels.push(d.toLocaleDateString('es-VE', { day: '2-digit', month: 'short' }));
+        const daysInMonth = new Date(parseInt(year), parseInt(month), 0).getDate();
+        for (let day = 1; day <= daysInMonth; day++) {
+            labels.push(day);
+            
             const daySales = state.sales.filter(s => {
-                const sd = new Date(s.date);
-                return sd >= d && sd < new Date(d.getTime() + 3 * 24 * 60 * 60 * 1000);
+                const d = new Date(s.date);
+                return d.getFullYear() === parseInt(year) && (d.getMonth() + 1) === parseInt(month) && d.getDate() === day;
             });
+            const dayExpenses = state.expenses.filter(e => {
+                const d = new Date(e.date);
+                return d.getFullYear() === parseInt(year) && (d.getMonth() + 1) === parseInt(month) && d.getDate() === day;
+            });
+            
             incomeData.push(daySales.reduce((sum, s) => sum + (s.price * s.qty), 0));
-            costData.push(daySales.reduce((sum, s) => sum + (s.cost * s.qty), 0));
+            costData.push(dayExpenses.reduce((sum, e) => sum + e.amount, 0));
         }
     } else {
-        // Year or Todo - by month
-        for (let i = 11; i >= 0; i--) {
-            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-            labels.push(d.toLocaleDateString('es-VE', { month: 'short' }));
-            const monthSales = state.sales.filter(s => {
-                const sd = new Date(s.date);
-                return sd.getMonth() === d.getMonth() && sd.getFullYear() === d.getFullYear();
-            });
-            incomeData.push(monthSales.reduce((sum, s) => sum + (s.price * s.qty), 0));
-            costData.push(monthSales.reduce((sum, s) => sum + (s.cost * s.qty), 0));
+        // Histórico YTD - Agrupar de manera dinámica mes a mes
+        document.getElementById('chart-title').textContent = 'Ventas vs Costos (Histórico YTD)';
+
+        const monthsSet = new Set();
+        [...state.sales, ...state.expenses].forEach(item => {
+            if (item.date) {
+                monthsSet.add(item.date.substring(0, 7)); // "YYYY-MM"
+            }
+        });
+        
+        const sortedMonths = Array.from(monthsSet).sort();
+        if (sortedMonths.length === 0) {
+            sortedMonths.push(new Date().toISOString().substring(0, 7));
         }
+
+        sortedMonths.forEach(ym => {
+            const [year, month] = ym.split('-');
+            const dateObj = new Date(parseInt(year), parseInt(month) - 1, 1);
+            const label = dateObj.toLocaleDateString('es-VE', { month: 'short', year: '2-digit' });
+            labels.push(label);
+
+            const mSales = state.sales.filter(s => {
+                const d = new Date(s.date);
+                return d.getFullYear() === parseInt(year) && (d.getMonth() + 1) === parseInt(month);
+            });
+            const mExpenses = state.expenses.filter(e => {
+                const d = new Date(e.date);
+                return d.getFullYear() === parseInt(year) && (d.getMonth() + 1) === parseInt(month);
+            });
+
+            incomeData.push(mSales.reduce((sum, s) => sum + (s.price * s.qty), 0));
+            costData.push(mExpenses.reduce((sum, e) => sum + e.amount, 0));
+        });
     }
 
     mainChart.data.labels = labels;
@@ -721,6 +1066,7 @@ function updateChart() {
 
 function showToast(msg, type = 'info') {
     const container = document.getElementById('toast-container');
+    if (!container) return;
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
     toast.textContent = msg;
@@ -737,34 +1083,29 @@ function showToast(msg, type = 'info') {
 let currentTutorialStep = 0;
 const tutorialSteps = [
     {
-        title: "¡Bienvenida a Sweet&Fit!",
-        text: "Esta app está diseñada para ayudarte a controlar las finanzas y el stock de tus brownies de forma simple y elegante.",
+        title: "¡Bienvenida a Sweet&Fit v2!",
+        text: "Hemos rediseñado tu app para alinearnos al 100% con tu forma de trabajo. Dile adiós a los archivos de Excel complicados.",
         icon: "✨"
     },
     {
-        title: "Controla tu Margen",
-        text: "En el Dashboard verás tus ingresos y costos reales. El círculo de margen te dirá si tu negocio está siendo rentable después de todos los gastos.",
-        icon: "📊"
+        title: "Cuentas por Cobrar en Vivo",
+        text: "En la pestaña 'Cobranzas' verás en un solo lugar qué aliados o clientes te deben dinero y cuánto. Podrás registrar sus pagos con una referencia bancaria al instante.",
+        icon: "🔴"
     },
     {
-        title: "Registra tus Horneadas",
-        text: "Cada vez que hornees una bandeja, ve a 'Inventario' y presiona 'Hornear Batch'. La app sumará 9 unidades al stock y registrará el costo de los ingredientes.",
-        icon: "🥧"
-    },
-    {
-        title: "Vende con un Clic",
-        text: "Cuando te llamen para un pedido, usa 'Nueva Venta'. La app descontará los brownies del stock y calculará el monto en Bolívares según la tasa BCV del momento.",
+        title: "Registra tus Ventas Fácilmente",
+        text: "Usa 'Nueva Venta' para asentar pedidos comerciales o individuales. Marca el estatus como PENDIENTE o PAGADO directamente según el momento de la venta.",
         icon: "💰"
     },
     {
-        title: "Ajusta tus Costos",
-        text: "Si los ingredientes suben de precio, ve a 'Costos' y actualízalos. Así tus reportes de utilidad siempre serán precisos.",
-        icon: "🏗️"
+        title: "Sigue tus Gastos Reales",
+        text: "En la pestaña 'Gastos' podrás registrar cada compra de materia prima o egresos fijos del negocio, sin necesidad de lidiar con stock virtual restrictivo.",
+        icon: "💸"
     },
     {
-        title: "¡Todo listo!",
-        text: "Los datos se guardan en este dispositivo. ¡Mucho éxito con tu negocio de Brownies Keto!",
-        icon: "🚀"
+        title: "Dashboard de Utilidad Real",
+        text: "Aquí verás tus ganancias reales, egresos y cuentas pendientes en dólares y bolívares según la tasa BCV oficial del momento.",
+        icon: "📊"
     }
 ];
 

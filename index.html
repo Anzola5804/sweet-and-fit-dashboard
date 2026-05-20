@@ -6,6 +6,7 @@
     <title>Sweet&Fit | Control Financiero</title>
     <link rel="stylesheet" href="app.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
     <div class="app">
@@ -22,6 +23,12 @@
                 <div class="rate" id="bcv-rate-sidebar">--.-- Bs</div>
             </div>
 
+            <div id="sidebar-sync" class="bcv-chip" style="margin-top: 8px; background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.1);">
+                <div class="dot" id="sync-dot" style="background: rgba(255,255,255,0.4); animation: none; width: 6px; height: 6px; border-radius: 50%;"></div>
+                <div class="label" id="sync-label" style="color: rgba(255,255,255,0.5); font-size: 11px;">Modo Local</div>
+                <div class="rate" id="sync-rate" style="color: rgba(255,255,255,0.4); font-size: 13px;">📶</div>
+            </div>
+
             <nav class="sidebar-nav">
                 <div class="nav-item active" data-page="dashboard">
                     <span class="nav-icon">📊</span> Dashboard
@@ -30,10 +37,10 @@
                     <span class="nav-icon">💰</span> Ventas
                 </div>
                 <div class="nav-item" data-page="inventory">
-                    <span class="nav-icon">🥧</span> Inventario
+                    <span class="nav-icon">💸</span> Gastos
                 </div>
-                <div class="nav-item" data-page="costs">
-                    <span class="nav-icon">🏗️</span> Costos
+                <div class="nav-item" data-page="cobranzas">
+                    <span class="nav-icon">🔴</span> Cobranzas
                 </div>
                 <div class="nav-item" data-page="settings">
                     <span class="nav-icon">⚙️</span> Ajustes
@@ -44,55 +51,44 @@
         <main class="main">
             <!-- Topbar -->
             <header class="topbar">
-            <h2 id="page-title">Dashboard</h2>
-            <div class="flex items-center gap-10">
-                <button class="btn btn-secondary btn-sm" onclick="startTutorial()">❓ Tutorial</button>
-                <div class="topbar-bcv">
-                    <span>Tasa BCV:</span>
-                    <span id="bcv-rate-top">--.-- Bs</span>
+                <h2 id="page-title">Dashboard</h2>
+                
+                <div class="flex items-center gap-10">
+                    <button class="btn btn-secondary btn-sm" onclick="startTutorial()">❓ Tutorial</button>
+                    <div class="topbar-bcv">
+                        <span>Tasa BCV:</span>
+                        <span id="bcv-rate-top">--.-- Bs</span>
+                    </div>
                 </div>
-            </div>
-        </header>
+            </header>
 
             <!-- Page: Dashboard -->
             <section id="page-dashboard" class="page-content">
-                <div class="period-tabs">
-                    <button class="period-tab active" data-period="today">Hoy</button>
-                    <button class="period-tab" data-period="week">Semana</button>
-                    <button class="period-tab" data-period="month">Mes</button>
-                    <button class="period-tab" data-period="all">Todo</button>
-                </div>
 
                 <div class="kpi-grid">
                     <div class="kpi-card income">
                         <div class="kpi-icon">💵</div>
-                        <div class="kpi-label">Ingresos</div>
+                        <div class="kpi-label">Ingresos Totales</div>
                         <div class="kpi-value" id="kpi-income">$ 0.00</div>
                         <div class="kpi-bs" id="kpi-income-bs">Bs 0.00</div>
                     </div>
-                    <div class="kpi-card cost">
+                    <div class="kpi-card fixed">
                         <div class="kpi-icon">📦</div>
-                        <div class="kpi-label">Costos Var.</div>
+                        <div class="kpi-label">Egresos / Gastos</div>
                         <div class="kpi-value" id="kpi-cost-var">$ 0.00</div>
                         <div class="kpi-bs" id="kpi-cost-var-bs">Bs 0.00</div>
                     </div>
-                    <div class="kpi-card fixed">
-                        <div class="kpi-icon">🏢</div>
-                        <div class="kpi-label">Costos Fijos</div>
-                        <div class="kpi-value" id="kpi-cost-fixed">$ 0.00</div>
-                        <div class="kpi-bs" id="kpi-cost-fixed-bs">Bs 0.00</div>
-                    </div>
                     <div class="kpi-card profit">
                         <div class="kpi-icon">✅</div>
-                        <div class="kpi-label">Utilidad Neta</div>
+                        <div class="kpi-label">Utilidad Real</div>
                         <div class="kpi-value" id="kpi-profit">$ 0.00</div>
                         <div class="kpi-bs" id="kpi-profit-bs">Bs 0.00</div>
                     </div>
-                    <div class="kpi-card stock">
-                        <div class="kpi-icon">📦</div>
-                        <div class="kpi-label">Stock Actual</div>
-                        <div class="kpi-value" id="kpi-stock">0</div>
-                        <div class="kpi-sub">unidades (brownies)</div>
+                    <div class="kpi-card stock" style="border-left: 4px solid var(--danger);">
+                        <div class="kpi-icon">🔴</div>
+                        <div class="kpi-label">Cuentas por Cobrar</div>
+                        <div class="kpi-value" id="kpi-stock" style="color: var(--danger);">$ 0.00</div>
+                        <div class="kpi-bs" id="kpi-stock-bs">Bs 0.00</div>
                     </div>
                 </div>
 
@@ -105,7 +101,7 @@
                 </div>
 
                 <div class="chart-card">
-                    <h3 id="chart-title">Ventas vs Costos (Semana)</h3>
+                    <h3 id="chart-title">Ventas vs Costos (Mes)</h3>
                     <div class="chart-wrap">
                         <canvas id="mainChart"></canvas>
                     </div>
@@ -126,9 +122,15 @@
                     </div>
                     <div class="product-stat">
                         <div class="emoji">🎯</div>
-                        <div class="p-name">Individual</div>
+                        <div class="p-name">Detal</div>
                         <div class="p-qty" id="stat-qty-3">0</div>
                         <div class="p-rev" id="stat-rev-3">$ 0.00</div>
+                    </div>
+                    <div class="product-stat">
+                        <div class="emoji">💼</div>
+                        <div class="p-name">Comercial</div>
+                        <div class="p-qty" id="stat-qty-4">0</div>
+                        <div class="p-rev" id="stat-rev-4">$ 0.00</div>
                     </div>
                 </div>
             </section>
@@ -145,10 +147,12 @@
                         <thead>
                             <tr>
                                 <th>Fecha</th>
+                                <th>Cliente</th>
                                 <th>Producto</th>
                                 <th>Cant.</th>
                                 <th>Total ($)</th>
-                                <th>Tasa</th>
+                                <th>Estatus</th>
+                                <th>Documento</th>
                                 <th>Acción</th>
                             </tr>
                         </thead>
@@ -164,39 +168,21 @@
                 </div>
             </section>
 
-            <!-- Page: Inventory -->
+            <!-- Page: Inventory (Gastos) -->
             <section id="page-inventory" class="page-content" style="display: none;">
                 <div class="flex justify-between items-center mb-16">
-                    <h3 class="section-title">Control de Producción</h3>
-                    <button class="btn btn-primary" onclick="showModal('bake-modal')">🔥 Hornear Batch (9)</button>
+                    <h3 class="section-title">Registro de Gastos y Compras</h3>
+                    <button class="btn btn-primary" onclick="showModal('bake-modal')">➕ Nuevo Gasto / Compra</button>
                 </div>
                 
-                <div class="inventory-status-card mb-24">
-                    <div class="inv-main">
-                        <div class="inv-label">Total Brownies Disponibles</div>
-                        <div class="inv-total" id="inv-total-display">0</div>
-                    </div>
-                    <div class="inv-details">
-                        <div class="inv-det-item">
-                            <span class="label">Bandejas completas:</span>
-                            <span class="val" id="inv-trays-display">0</span>
-                        </div>
-                        <div class="inv-det-item">
-                            <span class="label">Unidades sueltas:</span>
-                            <span class="val" id="inv-units-display">0</span>
-                        </div>
-                    </div>
-                </div>
-
-                <h4 class="mb-16">Historial de Producción</h4>
                 <div class="table-card">
                     <table id="prod-table">
                         <thead>
                             <tr>
                                 <th>Fecha</th>
-                                <th>Evento</th>
-                                <th>Cant.</th>
-                                <th>Costo Var.</th>
+                                <th>Detalle / Insumo</th>
+                                <th>Monto ($)</th>
+                                <th>Monto (Bs)</th>
                                 <th>Acción</th>
                             </tr>
                         </thead>
@@ -207,31 +193,17 @@
                 </div>
             </section>
 
-            <!-- Page: Costs -->
-            <section id="page-costs" class="page-content" style="display: none;">
-                <div class="cost-tabs">
-                    <button class="cost-tab active" data-tab="fixed">Costos Fijos</button>
-                    <button class="cost-tab" data-tab="ingredients">Ingredientes (Variables)</button>
-                </div>
-
-                <div id="cost-fixed-section">
-                    <div class="flex justify-between items-center mb-16">
-                        <h3 class="section-title">Costos Mensuales Fijos</h3>
-                        <button class="btn btn-primary btn-sm" onclick="showModal('cost-modal')">➕ Añadir Fijo</button>
-                    </div>
-                    <div id="fixed-costs-list" class="cost-list">
-                        <!-- JS populated -->
+            <!-- Page: Cobranzas (Accounts Receivable) -->
+            <section id="page-cobranzas" class="page-content" style="display: none;">
+                <div class="mb-16">
+                    <h3 class="section-title">Consola de Cuentas por Cobrar (Deudas)</h3>
+                    <div class="info-banner" style="background: rgba(235, 87, 87, 0.1); color: var(--danger); border-left-color: var(--danger);">
+                        Aquí puedes ver la lista de aliados y clientes individuales que tienen saldos pendientes por cancelar.
                     </div>
                 </div>
 
-                <div id="cost-ingredients-section" style="display: none;">
-                    <div class="mb-16">
-                        <h3 class="section-title">Costo de Insumos por Batch</h3>
-                        <div class="info-banner">Estos costos definen cuánto gastas cada vez que horneas una bandeja de 9 brownies. Puedes editarlos directamente aquí abajo.</div>
-                    </div>
-                    <div id="ingredients-list" class="ing-grid">
-                        <!-- JS populated -->
-                    </div>
+                <div id="cobranzas-grid" class="cobranzas-grid">
+                    <!-- JS populated -->
                 </div>
             </section>
 
@@ -245,8 +217,11 @@
                 </div>
                 <div class="settings-section">
                     <h3>Mantenimiento</h3>
-                    <p class="mb-16" style="font-size: 14px; color: var(--text-mid);">Los datos se guardan en este navegador. Puedes borrarlos todos si quieres empezar de cero.</p>
-                    <button class="btn btn-danger btn-full" onclick="resetAllData()">🗑️ Borrar todos los datos</button>
+                    <p class="mb-16" style="font-size: 14px; color: var(--text-mid);">Los datos se guardan en este navegador. Puedes borrarlos todos si quieres empezar de cero o cargar los datos de prueba de Mayo 2026.</p>
+                    <div class="flex gap-10">
+                        <button class="btn btn-secondary btn-full" onclick="loadTestData()">📥 Cargar Datos de Prueba (Mayo 2026)</button>
+                        <button class="btn btn-danger btn-full" onclick="resetAllData()">🗑️ Borrar todos los datos</button>
+                    </div>
                 </div>
             </section>
         </main>
@@ -262,12 +237,12 @@
                 <span>Ventas</span>
             </div>
             <div class="bot-nav-item" data-page="inventory">
-                <span class="icon">🥧</span>
-                <span>Stock</span>
+                <span class="icon">💸</span>
+                <span>Gastos</span>
             </div>
-            <div class="bot-nav-item" data-page="costs">
-                <span class="icon">🏗️</span>
-                <span>Costos</span>
+            <div class="bot-nav-item" data-page="cobranzas">
+                <span class="icon">🔴</span>
+                <span>Cobranzas</span>
             </div>
             <div class="bot-nav-item" data-page="settings">
                 <span class="icon">⚙️</span>
@@ -296,14 +271,34 @@
                     </div>
                     <div class="product-pick-card" data-pid="3">
                         <div class="emoji">🎯</div>
-                        <div class="p-name">Indiv.</div>
+                        <div class="p-name">Detal</div>
+                        <div class="p-price">$ 3.00</div>
+                    </div>
+                    <div class="product-pick-card" data-pid="4">
+                        <div class="emoji">💼</div>
+                        <div class="p-name">Comercial</div>
                         <div class="p-price">$ 2.50</div>
                     </div>
                 </div>
             </div>
             <div class="form-group">
+                <label>Cliente / Aliado Comercial</label>
+                <input type="text" id="sale-client" placeholder="Ej: VESUVIO, OMAR ESPINOZA" required>
+            </div>
+            <div class="form-group">
                 <label>Cantidad (Bandejas/Unid)</label>
                 <input type="number" id="sale-qty" value="1" min="1">
+            </div>
+            <div class="form-group">
+                <label>Estatus del Pago</label>
+                <select id="sale-status" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #ddd; background: #fff;">
+                    <option value="CANCELADO">PAGADO (CANCELADO)</option>
+                    <option value="PENDIENTE">PENDIENTE POR COBRAR</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Nº Factura / Documento (Opcional)</label>
+                <input type="text" id="sale-doc" placeholder="Ej: FACTURA 450 o S/F">
             </div>
             <div class="form-group">
                 <label>Tasa aplicada (Bs/$)</label>
@@ -316,32 +311,18 @@
         </div>
     </div>
 
-    <div id="cost-modal" class="modal-overlay">
-        <div class="modal-box">
-            <h3>Añadir Costo Fijo</h3>
-            <div class="form-group">
-                <label>Descripción</label>
-                <input type="text" id="cost-desc" placeholder="Ej: Internet, Gas, Alquiler">
-            </div>
-            <div class="form-group">
-                <label>Monto Mensual ($)</label>
-                <input type="number" id="cost-amount" step="0.01">
-            </div>
-            <div class="flex gap-10">
-                <button class="btn btn-secondary btn-full" onclick="hideModal('cost-modal')">Cancelar</button>
-                <button class="btn btn-primary btn-full" onclick="saveCost()">Añadir</button>
-            </div>
-        </div>
-    </div>
-
     <div id="bake-modal" class="modal-overlay">
         <div class="modal-box">
             <input type="hidden" id="edit-bake-id" value="">
-            <h3 id="bake-modal-title">Registrar Horneado</h3>
-            <p class="mb-16" style="font-size: 14px; color: var(--text-mid);">Cada horneada (batch) genera **9 unidades** y descuenta el costo de ingredientes ($13.55).</p>
+            <h3 id="bake-modal-title">Registrar Gasto / Compra</h3>
+            <p class="mb-16" style="font-size: 14px; color: var(--text-mid);">Registra egresos por insumos (chocolates, harina, cajas) o gastos del negocio.</p>
             <div class="form-group">
-                <label>¿Cuántas bandejas horneaste?</label>
-                <input type="number" id="bake-qty" value="1" min="1">
+                <label>Detalle / Insumo</label>
+                <input type="text" id="bake-name" placeholder="Ej: Harina de Almendra, Chocolates SUN, Monkfruit, Cajas" required>
+            </div>
+            <div class="form-group">
+                <label>Monto total de la compra ($)</label>
+                <input type="number" id="bake-qty" step="0.01" value="0.00" min="0.01">
             </div>
             <div class="flex gap-10">
                 <button class="btn btn-secondary btn-full" onclick="hideModal('bake-modal')">Cancelar</button>
